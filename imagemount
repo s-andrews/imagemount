@@ -1,0 +1,304 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Fuse "fuse_get_context";
+use IO::File;
+use POSIX qw(ENOTDIR ENOENT ENOSYS EEXIST EPERM O_RDONLY O_RDWR O_APPEND O_CREAT setsid);
+use Fcntl qw(S_ISBLK S_ISCHR S_ISFIFO SEEK_SET S_ISREG S_ISFIFO S_IMODE S_ISCHR S_ISBLK S_ISSOCK);
+use FindBin qw($Bin);
+
+##########################################################################
+#                                                                        #
+# Copyright 2019, Simon Andrews (simon.andrews@babraham.ac.uk)           #
+#                                                                        #
+# This file is part of imagemount.                                       #
+#                                                                        #
+# Imagemount is free software: you can redistribute it and/or modify     #
+# it under the terms of the GNU General Public License as published by   #
+# the Free Software Foundation, either version 3 of the License, or      #
+# (at your option) any later version.                                    #
+#                                                                        #
+# Imagemount is distributed in the hope that it will be useful,          #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of         #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the          #
+# GNU General Public License for more details.                           #
+#                                                                        #
+# You should have received a copy of the GNU General Public License      #
+# along with Imagemount.  If not, see <http://www.gnu.org/licenses/>.    #
+##########################################################################
+
+#############################################################################
+# This script provides a FUSE filesystem driver which can be used to directly
+# expose sierra data on a unix filesystem.
+#
+# The script must be run as root, and beyond the configration settings 
+# below, takes no command line arguments.  It will create a virtual 
+# filesystem at the specified mount point under which users will be able
+# to see their own samples, and any other samples to which they have 
+# been given permission within Sierra.
+#
+# This system requires that the main run folder is mounted on the system
+# somewhere visible to the super-user, but not to normal users.  It also
+# requires a file to be created to map between unix uids and the internal
+# person_id numbers within sierra.
+#############################################################################
+
+#################
+# Configuration #
+#################
+
+# Do we want lots of messages about what we're doing?  You can use this when
+# first testing the system, but this should be turned off in production unless
+# you want very big log files.
+
+my $debug = 1;
+
+
+# Where in the filesystem should this mount be visible?  This
+# directory must already exist.  The mount will fail if it 
+# doesn't.
+my $mountpoint = "/bi/imaging";
+
+
+# Where is the actual data directory which exposes the full list
+# of run folders?
+my $data_dir = "/bi/imagemount/imagemount";
+
+
+# What file name do we give to the file which users with no 
+# registered folders will see
+my $unregistered_file_name = "README_IF_YOU_CANT_SEE_ANY_DATA.txt";
+
+
+# How many seconds before we stat the uid mapping config file to 
+# see if we need to reload it.
+my $check_interval = 10; 
+
+# Where is the uid config file stored
+my $uid_mapping_file = "$Bin/imagemount_id_map.txt";
+
+#########################
+# END OF CONFIGURATION  #
+# DON'T EDIT BELOW HERE #
+#########################
+
+sub getdir {
+
+		my ($base) = @_;
+
+		warn "Listing contents of '$base'\n" if ($debug);
+
+		my $uid = fuse_get_context()->{'uid'};
+
+		# TODO : Check if they have no UID mappings listed and send them
+		# the unregistered file
+		#unless (defined $sierra_id) {
+		#		warn "UID $uid is not in the UID map\n" if ($debug);
+		#		return ($unregistered_file_name,0);
+		#}
+
+
+
+		# TODO: Check that they are allowed to look in this directory.
+		unless (validate_user_permission($uid,$base)) {
+				warn "UID $uid isn't allowed to look at $base\n" if ($debug);
+				return -ENOENT();
+		}
+
+		# Get the translated name of this directory
+		my $real_directory = convert_path($base);
+
+		warn "Base=$base Translated=$real_directory\n" if ($debug);
+
+		my @paths = glob("$real_directory/*");
+
+		warn "Found ".scalar @paths." paths under $real_directory\n" if ($debug);
+
+		my @files;
+		foreach my $path (@paths) {
+				$path =~ s/^\Q$real_directory\/\Q//;
+
+				if ($base eq '/') {
+						# We need to check which sub-folders they can see
+						if (validate_user_permission($uid,$path)) {
+								push @files, $path;
+						}
+				}
+				else {
+						push @files,$path;
+				}
+		}
+
+		push @files,0;
+
+		return @files;
+
+
+		# If this fails we need to:
+		#     return -ENOENT();
+
+}
+
+sub getattr {
+
+		my ($file) = @_;
+
+		warn "Getting context for $file\n" if ($debug);
+
+		my $context = fuse_get_context();
+
+		my @default = (0, 0, 0040700, 1, $context->{'uid'}, $context->{'gid'}, 0, 0, 0, 0, 0, 4096, 0);
+
+		if ($file eq '/') {
+				return @default;
+		}
+		
+
+		elsif ($file eq "/$unregistered_file_name") {
+				@default = lstat("$Bin/unregistered_user.txt");
+				$default[2] = 33060;
+		}
+
+				
+		else {
+				my $real_path = convert_path($file);
+
+				return @default unless ($real_path);
+
+				my @stats = lstat($real_path);
+				
+				$stats[4] = $context->{'uid'};
+				$stats[5] = $context->{'gid'};
+
+				return @stats;
+		}
+
+}
+
+sub imagemount_open {
+    my ($path,$mode) = @_;
+
+		if ($path eq "/$unregistered_file_name") {
+				return 0;
+		}
+
+		my $file = convert_path($path);
+
+    return -$! unless sysopen(FILE,$file,$mode);
+    close(FILE);
+    return 0;
+}
+
+
+sub release {
+    return 0;
+}
+
+sub imagemount_read {
+
+    my ($path,$bufsize,$off) = @_;
+
+		my $file;
+
+		if ($path eq "/$unregistered_file_name") {
+				warn "Sending unregistered user data\n" if ($debug);
+				$file = "$Bin/unregistered_user.txt";
+		}
+
+		else {
+				$file = convert_path($path);
+		}
+
+		warn "Reading $path\n" if ($debug);
+
+    my ($rv) = -ENOSYS();
+    my ($handle) = new IO::File;
+    return -ENOENT() unless -e ($file);
+    my ($fsize) = -s $file;
+    return -ENOSYS() unless open($handle,$file);
+    if(seek($handle,$off,SEEK_SET)) {
+        read($handle,$rv,$bufsize);
+    }
+
+		warn "Data sent\n" if ($debug);
+
+    return $rv;
+}
+
+
+
+
+sub convert_path {
+		my ($fuse_path) = @_;
+		
+		return($data_dir."/".$fuse_path);
+}
+
+
+{
+
+		my %permission_cache;
+		my $last_flushed_time;
+		
+		sub validate_user_permission {
+				my ($uid,$path)  = @_;
+
+				my ($top) = split("/\//",$path);
+
+				return 1 if ($top eq "/");
+
+				# Remove any leading slashes.
+				$top =~ s/^\/+//;
+		
+				warn "Validating uid=$uid path=$path top=$top\n" if ($debug);
+
+				# See if we need to flush the cache
+				unless (defined $last_flushed_time) {
+						$last_flushed_time = time();
+				}
+
+				# We flush every hour
+#				if (time() - $last_flushed_time > 3600) {
+						$last_flushed_time = time();
+						%permission_cache = ();
+
+						open (IN,$uid_mapping_file) or die "Can't read mapping file: $!";
+
+						while (<IN>) {
+								chomp;
+								my ($uid, @folders) = split(/\t/);
+
+								foreach my $folder (@folders) {
+										$permission_cache{"$uid:$folder"} = 1;
+								}
+
+						}
+
+#				}
+
+ 
+				# See if there's a cached permission
+				if (exists $permission_cache{"$uid:$top"}) {
+						warn "Validated $uid against dir $top from cache\n" if ($debug);
+						return 1;
+				}
+				else {
+						return 0;
+				}
+		}
+}
+
+
+Fuse::main(
+    mountpoint  => $mountpoint,
+    getdir      => \&getdir,
+    getattr     => \&getattr,
+		open        => \&imagemount_open,
+		release     => \&release,
+    read        => \&imagemount_read,
+#		read_buf    => \&sierra_read_buf, # Our FUSE is too old to have this
+		mountopts   => "allow_other,ro",
+    threaded    => 0,
+#		debug       => $debug,
+);
+
