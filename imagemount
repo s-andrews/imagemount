@@ -110,12 +110,15 @@ sub getdir {
 
 		warn "Base=$base Translated=$real_directory\n" if ($debug);
 
-		my @paths = glob("$real_directory/*");
+		my @paths = glob("'$real_directory/*'");
 
 		warn "Found ".scalar @paths." paths under $real_directory\n" if ($debug);
 
 		my @files;
 		foreach my $path (@paths) {
+
+				warn "Looking at '$path'\n" if ($debug);
+
 				$path =~ s/^\Q$real_directory\/\Q//;
 
 				if ($base eq '/') {
@@ -163,7 +166,7 @@ sub getattr {
 		else {
 				my $real_path = convert_path($file);
 
-				return @default unless ($real_path);
+				return @default unless (-e $real_path);
 
 				my @stats = lstat($real_path);
 				
@@ -243,12 +246,16 @@ sub convert_path {
 		sub validate_user_permission {
 				my ($uid,$path)  = @_;
 
-				my ($top) = split("/\//",$path);
+				# Remove any leading slashes.
+				$path =~ s/^\/+//;
+
+
+				my ($top) = split(/\//,$path);
+
+				warn "First element of '$path' is $top\n" if ($debug);
 
 				return 1 if ($top eq "/");
 
-				# Remove any leading slashes.
-				$top =~ s/^\/+//;
 		
 				warn "Validating uid=$uid path=$path top=$top\n" if ($debug);
 
