@@ -273,7 +273,8 @@ sub convert_path {
 
 						while (<IN>) {
 								chomp;
-								my ($uid, @folders) = split(/\t/);
+								my ($username, @folders) = split(/\t/);
+								my $uid = getpwnam($username);
 
 								foreach my $folder (@folders) {
 										$permission_cache{"$uid:$folder"} = 1;
@@ -285,7 +286,14 @@ sub convert_path {
 
  
 				# See if there's a cached permission
-				if (exists $permission_cache{"$uid:$top"}) {
+
+				# If someone is given a * permission then it means they are allowed
+				# to see everything.  This will be for admins only
+				if (exists $permission_cache{"$uid:*"}) {
+						warn "Validated $uid against * from cache\n" if ($debug);
+						return 1;
+				}
+				elsif (exists $permission_cache{"$uid:$top"}) {
 						warn "Validated $uid against dir $top from cache\n" if ($debug);
 						return 1;
 				}
