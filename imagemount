@@ -51,7 +51,7 @@ use FindBin qw($Bin);
 # first testing the system, but this should be turned off in production unless
 # you want very big log files.
 
-my $debug = 1;
+my $debug = 0;
 
 
 # Where in the filesystem should this mount be visible?  This
@@ -289,6 +289,12 @@ sub convert_path {
 
 				# If someone is given a * permission then it means they are allowed
 				# to see everything.  This will be for admins only
+
+				# Everryone is allowed to look at the root
+				if ($top eq '') {
+						warn "Root directory is allowed for everyone\n" if ($debug);
+						return 1;
+				}
 				if (exists $permission_cache{"$uid:*"}) {
 						warn "Validated $uid against * from cache\n" if ($debug);
 						return 1;
